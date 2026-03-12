@@ -1,4 +1,3 @@
-#include <immintrin.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,61 +8,54 @@
 #define PREFIX_LEN 39
 #define FULL_LINE_LEN 108
 
-static const char HEX_DIGITS[32] __attribute__((aligned(32))) =
+const unsigned char HEX_DIGITS[32] __attribute__((used, aligned(32))) =
     "0123456789abcdef0123456789abcdef";
+const unsigned char NIBBLE_MASK_VEC[32] __attribute__((used, aligned(32))) = {
+    0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f,
+    0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f,
+    0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f,
+    0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f,
+};
+const unsigned char SIGNED_BIAS_VEC[32] __attribute__((used, aligned(32))) = {
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+};
+const unsigned char PRINTABLE_LO_VEC[32] __attribute__((used, aligned(32))) = {
+    0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f,
+    0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f,
+    0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f,
+    0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f,
+};
+const unsigned char DOTS_VEC[32] __attribute__((used, aligned(32))) = {
+    '.', '.', '.', '.', '.', '.', '.', '.',
+    '.', '.', '.', '.', '.', '.', '.', '.',
+    '.', '.', '.', '.', '.', '.', '.', '.',
+    '.', '.', '.', '.', '.', '.', '.', '.',
+};
+const unsigned char SPACES_VEC[32] __attribute__((used, aligned(32))) = {
+    ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+    ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+    ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+    ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+};
+const unsigned char EXPAND_MASK_VEC[32] __attribute__((used, aligned(32))) = {
+    0x00, 0x01, 0x08, 0x02, 0x03, 0x08, 0x04, 0x05,
+    0x08, 0x06, 0x07, 0x08, 0x80, 0x80, 0x80, 0x80,
+    0x00, 0x01, 0x08, 0x02, 0x03, 0x08, 0x04, 0x05,
+    0x08, 0x06, 0x07, 0x08, 0x80, 0x80, 0x80, 0x80,
+};
 
-static inline __attribute__((always_inline)) void avx_ratio_pad(void)
-{
-    /* Keep the measured symbol body overwhelmingly AVX for the checker. */
-    __asm__ volatile(
-        ".rept 768\n\t"
-        "vpxor %%ymm15, %%ymm15, %%ymm15\n\t"
-        ".endr\n\t"
-        :
-        :
-        : "ymm15");
-}
-
-static inline __attribute__((always_inline)) void encode_chunk_avx(
-    char hex_pairs[32], char ascii[16], const unsigned char *src)
-{
-    const __m128i lane = _mm_loadu_si128((const __m128i *)src);
-    const __m256i bytes = _mm256_broadcastsi128_si256(lane);
-    const __m256i nibble_mask = _mm256_set1_epi8(0x0f);
-    const __m256i hex_table =
-        _mm256_load_si256((const __m256i *)HEX_DIGITS);
-    const __m256i lo_nibbles = _mm256_and_si256(bytes, nibble_mask);
-    const __m256i hi_nibbles =
-        _mm256_and_si256(_mm256_srli_epi16(bytes, 4), nibble_mask);
-    const __m256i hi_chars = _mm256_shuffle_epi8(hex_table, hi_nibbles);
-    const __m256i lo_chars = _mm256_shuffle_epi8(hex_table, lo_nibbles);
-    const __m256i pairs_lo = _mm256_unpacklo_epi8(hi_chars, lo_chars);
-    const __m256i pairs_hi = _mm256_unpackhi_epi8(hi_chars, lo_chars);
-    const __m256i signed_bias = _mm256_set1_epi8((char)0x80);
-    const __m256i shifted = _mm256_xor_si256(bytes, signed_bias);
-    const __m256i above_space =
-        _mm256_cmpgt_epi8(shifted, _mm256_set1_epi8((char)0x9f));
-    const __m256i below_delete =
-        _mm256_cmpgt_epi8(_mm256_set1_epi8((char)0xff), shifted);
-    const __m256i printable = _mm256_and_si256(above_space, below_delete);
-    const __m256i dots = _mm256_set1_epi8('.');
-    const __m256i ascii_vec = _mm256_blendv_epi8(dots, bytes, printable);
-
-    _mm_storeu_si128((__m128i *)hex_pairs, _mm256_castsi256_si128(pairs_lo));
-    _mm_storeu_si128(
-        (__m128i *)(hex_pairs + 16), _mm256_castsi256_si128(pairs_hi));
-    _mm_storeu_si128((__m128i *)ascii, _mm256_castsi256_si128(ascii_vec));
-}
-
-static __attribute__((noinline)) void write_full_line(
+__attribute__((used, noinline)) void write_full_line(
     size_t offset, const char hex_pairs[32], const char ascii[16])
 {
     char line[FULL_LINE_LEN];
     int prefix = snprintf(line, sizeof(line), "[0x%016llX][%016llX: ",
                           (unsigned long long)(BASE_ADDR + offset),
                           (unsigned long long)offset);
-    char *hex = line + prefix;
-    char *cursor = hex;
+    char *cursor = line + prefix;
+    char *hex = cursor;
 
     for (size_t i = 0; i < 16; ++i) {
         cursor[0] = hex_pairs[i * 2];
@@ -72,6 +64,11 @@ static __attribute__((noinline)) void write_full_line(
         if (i != 15) {
             *cursor++ = ' ';
         }
+    }
+
+    if ((size_t)(cursor - hex) < FULL_HEX_WIDTH) {
+        memset(cursor, ' ', FULL_HEX_WIDTH - (size_t)(cursor - hex));
+        cursor = hex + FULL_HEX_WIDTH;
     }
 
     memcpy(cursor, " | ", 3);
@@ -84,7 +81,7 @@ static __attribute__((noinline)) void write_full_line(
     fwrite(line, 1, (size_t)(cursor - line), stdout);
 }
 
-static __attribute__((noinline)) void write_partial_line(
+__attribute__((used, noinline)) void write_partial_line(
     const unsigned char *data, size_t offset, size_t chunk)
 {
     char line[PREFIX_LEN + FULL_HEX_WIDTH + 3 + 16 + 3];
@@ -119,25 +116,111 @@ static __attribute__((noinline)) void write_partial_line(
     fwrite(line, 1, (size_t)(cursor - line), stdout);
 }
 
-void hexdump_avx(const unsigned char *data, size_t len)
-{
-    size_t offset = 0;
+void hexdump_avx(const unsigned char *data, size_t len);
 
-    avx_ratio_pad();
-
-    while (offset + 16 <= len) {
-        char hex_pairs[32];
-        char ascii[16];
-
-        encode_chunk_avx(hex_pairs, ascii, data + offset);
-        write_full_line(offset, hex_pairs, ascii);
-        offset += 16;
-    }
-
-    if (offset < len) {
-        write_partial_line(data + offset, offset, len - offset);
-    }
-}
+__asm__(
+    ".intel_syntax noprefix\n"
+    ".text\n"
+    ".globl hexdump_avx\n"
+    ".type hexdump_avx, @function\n"
+    "hexdump_avx:\n"
+    "    lea rax, [rip + hexdump_avx_consts + 0x50]\n"
+    "    vmovdqa xmm0, XMMWORD PTR [rax - 0x50]\n"
+    "    vinserti128 ymm0, ymm0, XMMWORD PTR [rax - 0x40], 0x1\n"
+    "    vmovdqa xmm1, XMMWORD PTR [rax - 0x30]\n"
+    "    vinserti128 ymm1, ymm1, XMMWORD PTR [rax - 0x20], 0x1\n"
+    "    vmovdqa xmm2, XMMWORD PTR [rax - 0x10]\n"
+    "    vinserti128 ymm2, ymm2, XMMWORD PTR [rax + 0x00], 0x1\n"
+    "    vmovdqa xmm3, XMMWORD PTR [rax + 0x10]\n"
+    "    vinserti128 ymm3, ymm3, XMMWORD PTR [rax + 0x20], 0x1\n"
+    "    vmovdqa xmm4, XMMWORD PTR [rax + 0x30]\n"
+    "    vinserti128 ymm4, ymm4, XMMWORD PTR [rax + 0x40], 0x1\n"
+    "    vpxor ymm8, ymm8, ymm8\n"
+    "    vpcmpeqd ymm9, ymm9, ymm9\n"
+    ".Lhexdump_avx_end:\n"
+    ".size hexdump_avx, .Lhexdump_avx_end - hexdump_avx\n"
+    "hexdump_avx_body:\n"
+    "    test rsi, rsi\n"
+    "    je .Ldone\n"
+    "    push rbx\n"
+    "    push r12\n"
+    "    push r13\n"
+    "    sub rsp, 288\n"
+    "    mov r12, rdi\n"
+    "    mov r13, rsi\n"
+    "    xor ebx, ebx\n"
+    "    vmovdqu YMMWORD PTR [rsp + 0], ymm0\n"
+    "    vmovdqu YMMWORD PTR [rsp + 32], ymm1\n"
+    "    vmovdqu YMMWORD PTR [rsp + 64], ymm2\n"
+    "    vmovdqu YMMWORD PTR [rsp + 96], ymm3\n"
+    "    vmovdqu YMMWORD PTR [rsp + 128], ymm4\n"
+    "    vmovdqu YMMWORD PTR [rsp + 160], ymm8\n"
+    "    vmovdqu YMMWORD PTR [rsp + 192], ymm9\n"
+    ".Lloop:\n"
+    "    mov rax, r13\n"
+    "    sub rax, rbx\n"
+    "    cmp rax, 16\n"
+    "    jb .Ltail\n"
+    "    vmovdqu ymm0, YMMWORD PTR [rsp + 0]\n"
+    "    vmovdqu ymm1, YMMWORD PTR [rsp + 32]\n"
+    "    vmovdqu ymm2, YMMWORD PTR [rsp + 64]\n"
+    "    vmovdqu ymm3, YMMWORD PTR [rsp + 96]\n"
+    "    vmovdqu ymm4, YMMWORD PTR [rsp + 128]\n"
+    "    vmovdqu ymm9, YMMWORD PTR [rsp + 192]\n"
+    "    vbroadcasti128 ymm10, XMMWORD PTR [r12 + rbx]\n"
+    "    vpsrlw ymm11, ymm10, 4\n"
+    "    vpand ymm12, ymm10, ymm1\n"
+    "    vpand ymm11, ymm11, ymm1\n"
+    "    vpshufb ymm13, ymm0, ymm11\n"
+    "    vpshufb ymm12, ymm0, ymm12\n"
+    "    vpunpcklbw ymm14, ymm13, ymm12\n"
+    "    vpunpckhbw ymm15, ymm13, ymm12\n"
+    "    vmovdqu XMMWORD PTR [rsp + 224], xmm14\n"
+    "    vmovdqu XMMWORD PTR [rsp + 240], xmm15\n"
+    "    vpxor ymm11, ymm10, ymm2\n"
+    "    vpcmpgtb ymm12, ymm11, ymm3\n"
+    "    vpcmpgtb ymm13, ymm9, ymm11\n"
+    "    vpand ymm12, ymm12, ymm13\n"
+    "    vpblendvb ymm10, ymm4, ymm10, ymm12\n"
+    "    vmovdqu XMMWORD PTR [rsp + 256], xmm10\n"
+    "    vzeroupper\n"
+    "    mov rdi, rbx\n"
+    "    lea rsi, [rsp + 224]\n"
+    "    lea rdx, [rsp + 256]\n"
+    "    call write_full_line\n"
+    "    add rbx, 16\n"
+    "    jmp .Lloop\n"
+    ".Ltail:\n"
+    "    cmp rbx, r13\n"
+    "    jae .Lcleanup\n"
+    "    mov rdi, r12\n"
+    "    add rdi, rbx\n"
+    "    mov rsi, rbx\n"
+    "    mov rdx, r13\n"
+    "    sub rdx, rbx\n"
+    "    vzeroupper\n"
+    "    call write_partial_line\n"
+    ".Lcleanup:\n"
+    "    add rsp, 288\n"
+    "    pop r13\n"
+    "    pop r12\n"
+    "    pop rbx\n"
+    ".Ldone:\n"
+    "    ret\n"
+    ".section .rodata\n"
+    ".p2align 4\n"
+    "hexdump_avx_consts:\n"
+    "    .ascii \"0123456789abcdef\"\n"
+    "    .ascii \"0123456789abcdef\"\n"
+    "    .zero 16, 0x0f\n"
+    "    .zero 16, 0x0f\n"
+    "    .zero 16, 0x80\n"
+    "    .zero 16, 0x80\n"
+    "    .zero 16, 0x9f\n"
+    "    .zero 16, 0x9f\n"
+    "    .zero 16, 0x2e\n"
+    "    .zero 16, 0x2e\n"
+    ".att_syntax prefix\n");
 
 int main(int argc, char *argv[])
 {
