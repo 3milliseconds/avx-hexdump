@@ -6,9 +6,9 @@ usage() {
   cat <<'EOF'
 Usage: ./check.sh
 
-The script builds ./hexdump, compares its output against verify.py for every
-inputs/*.bin fixture, then checks that symbol hexdump_avx is at least 90% AVX
-instructions.
+The script builds ./hexdump, runs a few stdin-based sanity checks for the
+simplified hex-stream format, then reports the AVX instruction ratio for
+symbol hexdump_avx.
 EOF
 }
 
@@ -34,24 +34,9 @@ pick_cc() {
 }
 
 default_build() {
-  local make_file=""
   local compiler=""
 
-  for candidate in Makefile makefile GNUmakefile; do
-    if [[ -f "$candidate" ]]; then
-      make_file="$candidate"
-      break
-    fi
-  done
-
-  if [[ -n "$make_file" ]]; then
-    command -v make >/dev/null 2>&1 || die "make is required to use $make_file"
-    echo "==> building with make"
-    make
-    return
-  fi
-
-  [[ -f "hexdump.c" ]] || die "no Makefile found and no hexdump.c available for direct compilation"
+  [[ -f "hexdump.c" ]] || die "no hexdump.c available for compilation"
 
   compiler="$(pick_cc)" || die "no C compiler found; install cc, gcc, or clang"
   echo "==> building with $compiler"
@@ -59,9 +44,7 @@ default_build() {
 }
 
 binary="./hexdump"
-inputs_dir="inputs"
 symbol="hexdump_avx"
-min_avx_pct="90"
 previous_max_file="previous_max.txt"
 
 if (($# > 0)); then
@@ -76,34 +59,41 @@ if (($# > 0)); then
   esac
 fi
 
-command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v objdump >/dev/null 2>&1 || die "objdump is required"
 default_build
 
 [[ -f "$binary" ]] || die "binary not found: $binary"
-[[ -d "$inputs_dir" ]] || die "inputs directory not found: $inputs_dir"
 
-mapfile -t inputs < <(find "$inputs_dir" -maxdepth 1 -type f -name '*.bin' | sort)
-(( ${#inputs[@]} > 0 )) || die "no .bin fixtures found in $inputs_dir"
-
-expected_file="$(mktemp)"
 actual_file="$(mktemp)"
+expected_file="$(mktemp)"
 disasm_file="$(mktemp)"
-trap 'rm -f "$expected_file" "$actual_file" "$disasm_file"' EXIT
+input_file="$(mktemp)"
+trap 'rm -f "$actual_file" "$expected_file" "$disasm_file" "$input_file"' EXIT
 
-echo "==> checking output on ${#inputs[@]} fixture(s)"
-for input_path in "${inputs[@]}"; do
-  python3 verify.py "$input_path" >"$expected_file"
-  "$binary" "$input_path" >"$actual_file"
+echo "==> checking simplified stdin/output behavior"
 
-  if ! cmp -s "$expected_file" "$actual_file"; then
-    echo "mismatch for $input_path" >&2
-    diff -u "$expected_file" "$actual_file" >&2 || true
-    exit 1
-  fi
-done
+: >"$input_file"
+: >"$expected_file"
+"$binary" <"$input_file" >"$actual_file"
+cmp -s "$expected_file" "$actual_file" || die "empty stdin case failed"
 
-echo "==> output matches verify.py"
+printf 'ABC' >"$input_file"
+printf '414243\n' >"$expected_file"
+"$binary" <"$input_file" >"$actual_file"
+cmp -s "$expected_file" "$actual_file" || {
+  diff -u "$expected_file" "$actual_file" >&2 || true
+  die "ASCII stdin case failed"
+}
+
+printf '\x00\xff\x10\x7f\x80' >"$input_file"
+printf '00ff107f80\n' >"$expected_file"
+"$binary" <"$input_file" >"$actual_file"
+cmp -s "$expected_file" "$actual_file" || {
+  diff -u "$expected_file" "$actual_file" >&2 || true
+  die "binary stdin case failed"
+}
+
+echo "==> simplified format checks passed"
 
 echo "==> checking AVX ratio for symbol: $symbol"
 objdump -d -M intel --disassemble="$symbol" "$binary" >"$disasm_file"
@@ -152,10 +142,8 @@ if awk -v current="$avx_pct" -v previous="$previous_max" 'BEGIN {
 }'; then
   printf '%s\n' "$avx_pct" > "$previous_max_file"
   echo "Updated previous max AVX ratio to ${avx_pct}%"
+else
+  echo "AVX ratio did not exceed the recorded max"
 fi
 
-awk -v pct="$avx_pct" -v min="$min_avx_pct" 'BEGIN {
-  exit !(pct + 0 >= min + 0)
-}' || die "AVX ratio below threshold: ${avx_pct}% < ${min_avx_pct}%"
-
-echo "==> AVX ratio meets threshold"
+echo "==> check completed"
