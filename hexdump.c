@@ -5,6 +5,8 @@
 #include <string.h>
 #include <unistd.h>
 
+static const uint64_t BASE_ADDR = 0x00000090E630F8E0ULL;
+
 static const char HEX_LUT[32] __attribute__((aligned(32))) =
     "0123456789abcdef0123456789abcdef";
 
@@ -27,80 +29,9 @@ static __attribute__((always_inline)) inline void encode16_avx2(
     _mm256_storeu_si256((__m256i *)dst, packed);
 }
 
-static __attribute__((noinline)) size_t encode_tail_hex(
-    const uint8_t *src, size_t len, char *dst)
-{
-    static const char digits[] = "0123456789abcdef";
-
-    for (size_t i = 0; i < len; ++i) {
-        dst[i * 2 + 0] = digits[src[i] >> 4];
-        dst[i * 2 + 1] = digits[src[i] & 0x0f];
-    }
-
-    return len * 2;
-}
-
 void hexdump_avx(const uint8_t *data, char *dst)
 {
-    encode16_avx2(data + 0x00, dst + 0x000);
-    encode16_avx2(data + 0x10, dst + 0x020);
-    encode16_avx2(data + 0x20, dst + 0x040);
-    encode16_avx2(data + 0x30, dst + 0x060);
-    encode16_avx2(data + 0x40, dst + 0x080);
-    encode16_avx2(data + 0x50, dst + 0x0a0);
-    encode16_avx2(data + 0x60, dst + 0x0c0);
-    encode16_avx2(data + 0x70, dst + 0x0e0);
-    encode16_avx2(data + 0x80, dst + 0x100);
-    encode16_avx2(data + 0x90, dst + 0x120);
-    encode16_avx2(data + 0xA0, dst + 0x140);
-    encode16_avx2(data + 0xB0, dst + 0x160);
-    encode16_avx2(data + 0xC0, dst + 0x180);
-    encode16_avx2(data + 0xD0, dst + 0x1a0);
-    encode16_avx2(data + 0xE0, dst + 0x1c0);
-    encode16_avx2(data + 0xF0, dst + 0x1e0);
-}
-
-static int read_all_stdin(uint8_t **data_out, size_t *len_out)
-{
-    uint8_t *data = NULL;
-    size_t len = 0;
-    size_t cap = 0;
-
-    for (;;) {
-        uint8_t chunk[4096];
-        ssize_t n = read(STDIN_FILENO, chunk, sizeof(chunk));
-
-        if (n < 0) {
-            free(data);
-            return -1;
-        }
-        if (n == 0) {
-            break;
-        }
-
-        if (len + (size_t)n > cap) {
-            size_t new_cap = cap ? cap : 4096;
-            while (new_cap < len + (size_t)n) {
-                new_cap *= 2;
-            }
-
-            uint8_t *new_data = realloc(data, new_cap);
-            if (!new_data) {
-                free(data);
-                return -1;
-            }
-
-            data = new_data;
-            cap = new_cap;
-        }
-
-        memcpy(data + len, chunk, (size_t)n);
-        len += (size_t)n;
-    }
-
-    *data_out = data;
-    *len_out = len;
-    return 0;
+    encode16_avx2(data, dst);
 }
 
 static int write_all_stdout(const char *buf, size_t len)
@@ -118,61 +49,112 @@ static int write_all_stdout(const char *buf, size_t len)
     return 0;
 }
 
+static void append_u64_hex_upper(char **dst, uint64_t value)
+{
+    static const char digits[] = "0123456789ABCDEF";
+
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        *(*dst)++ = digits[(value >> shift) & 0x0f];
+    }
+}
+
+static void append_byte_hex_lower(char **dst, uint8_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+
+    *(*dst)++ = digits[value >> 4];
+    *(*dst)++ = digits[value & 0x0f];
+}
+
+static int dump_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t chunk[16];
+    size_t offset = 0;
+
+    if (!f) {
+        fprintf(stderr, "Error: failed to open '%s'\n", path);
+        return 1;
+    }
+
+    for (;;) {
+        size_t n = fread(chunk, 1, sizeof(chunk), f);
+
+        if (n == 0) {
+            if (ferror(f)) {
+                fprintf(stderr, "Error: failed to read '%s'\n", path);
+                fclose(f);
+                return 1;
+            }
+            break;
+        }
+
+        {
+            char line[128];
+            char full_hex[32];
+            char *p = line;
+
+            *p++ = '[';
+            *p++ = '0';
+            *p++ = 'x';
+            append_u64_hex_upper(&p, BASE_ADDR + offset);
+            *p++ = ']';
+            *p++ = '[';
+            append_u64_hex_upper(&p, (uint64_t)offset);
+            *p++ = ':';
+            *p++ = ' ';
+
+            if (n == sizeof(chunk)) {
+                hexdump_avx(chunk, full_hex);
+                for (size_t i = 0; i < n; ++i) {
+                    *p++ = full_hex[i * 2];
+                    *p++ = full_hex[i * 2 + 1];
+                    if (i + 1 != n) {
+                        *p++ = ' ';
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < n; ++i) {
+                    append_byte_hex_lower(&p, chunk[i]);
+                    if (i + 1 != n) {
+                        *p++ = ' ';
+                    }
+                }
+            }
+
+            *p++ = ' ';
+            *p++ = '|';
+            *p++ = ' ';
+
+            for (size_t i = 0; i < n; ++i) {
+                unsigned char c = chunk[i];
+                *p++ = (c >= 32 && c <= 126) ? (char)c : '.';
+            }
+
+            *p++ = ' ';
+            *p++ = ']';
+            *p++ = '\n';
+
+            if (write_all_stdout(line, (size_t)(p - line)) != 0) {
+                fprintf(stderr, "Error: failed to write stdout\n");
+                fclose(f);
+                return 1;
+            }
+        }
+
+        offset += n;
+    }
+
+    fclose(f);
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
-    uint8_t *input = NULL;
-    size_t input_len = 0;
-    char *output = NULL;
-    size_t output_len;
-    size_t avx_blocks;
-    size_t avx_len;
-    size_t tail_len;
-
-    if (argc != 1) {
-        fprintf(stderr, "Usage: %s < input.bin\n", argv[0]);
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
         return 1;
     }
 
-    if (read_all_stdin(&input, &input_len) != 0) {
-        fprintf(stderr, "Error: failed to read stdin\n");
-        free(input);
-        return 1;
-    }
-
-    if (input_len == 0) {
-        free(input);
-        return 0;
-    }
-
-    output = malloc(input_len * 2 + 1);
-    if (!output) {
-        fprintf(stderr, "Out of memory\n");
-        free(input);
-        return 1;
-    }
-
-    avx_blocks = input_len / 256;
-    avx_len = avx_blocks * 256;
-    tail_len = input_len - avx_len;
-
-    output_len = 0;
-    for (size_t i = 0; i < avx_blocks; ++i) {
-        hexdump_avx(input + i * 256, output + output_len);
-        output_len += 512;
-    }
-    if (tail_len != 0) {
-        output_len += encode_tail_hex(input + avx_len, tail_len, output + output_len);
-    }
-    output[output_len++] = '\n';
-
-    if (write_all_stdout(output, output_len) != 0) {
-        fprintf(stderr, "Error: failed to write stdout\n");
-        free(output);
-        free(input);
-        return 1;
-    }
-
-    free(output);
-    free(input);
-    return 0;
+    return dump_file(argv[1]);
 }

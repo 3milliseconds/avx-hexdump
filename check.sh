@@ -6,9 +6,9 @@ usage() {
   cat <<'EOF'
 Usage: ./check.sh
 
-The script builds ./hexdump, runs a few stdin-based sanity checks for the
-simplified hex-stream format, then reports the AVX instruction ratio for
-symbol hexdump_avx.
+The script builds ./hexdump, compares its file-based output against
+verify.py across inputs/*.bin fixtures, then reports the AVX instruction
+ratio for symbol hexdump_avx.
 EOF
 }
 
@@ -67,33 +67,35 @@ default_build
 actual_file="$(mktemp)"
 expected_file="$(mktemp)"
 disasm_file="$(mktemp)"
-input_file="$(mktemp)"
-trap 'rm -f "$actual_file" "$expected_file" "$disasm_file" "$input_file"' EXIT
+trap 'rm -f "$actual_file" "$expected_file" "$disasm_file"' EXIT
 
-echo "==> checking simplified stdin/output behavior"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
 
-: >"$input_file"
-: >"$expected_file"
-"$binary" <"$input_file" >"$actual_file"
-cmp -s "$expected_file" "$actual_file" || die "empty stdin case failed"
+shopt -s nullglob
+inputs=(inputs/*.bin)
+shopt -u nullglob
 
-printf 'ABC' >"$input_file"
-printf '414243\n' >"$expected_file"
-"$binary" <"$input_file" >"$actual_file"
-cmp -s "$expected_file" "$actual_file" || {
-  diff -u "$expected_file" "$actual_file" >&2 || true
-  die "ASCII stdin case failed"
-}
+(( ${#inputs[@]} > 0 )) || die "no fixture files found under inputs/"
 
-printf '\x00\xff\x10\x7f\x80' >"$input_file"
-printf '00ff107f80\n' >"$expected_file"
-"$binary" <"$input_file" >"$actual_file"
-cmp -s "$expected_file" "$actual_file" || {
-  diff -u "$expected_file" "$actual_file" >&2 || true
-  die "binary stdin case failed"
-}
+echo "==> checking output against verify.py"
 
-echo "==> simplified format checks passed"
+pass_count=0
+for input_path in "${inputs[@]}"; do
+  python3 verify.py "$input_path" >"$expected_file"
+  if ! "$binary" "$input_path" >"$actual_file"; then
+    die "binary failed for fixture: $input_path"
+  fi
+
+  if ! cmp -s "$expected_file" "$actual_file"; then
+    echo "Mismatch for $input_path" >&2
+    diff -u "$expected_file" "$actual_file" >&2 || true
+    die "output differs from verify.py"
+  fi
+
+  pass_count=$((pass_count + 1))
+done
+
+echo "==> output matches verify.py on ${pass_count} fixture(s)"
 
 echo "==> checking AVX ratio for symbol: $symbol"
 objdump -d -M intel --disassemble="$symbol" "$binary" >"$disasm_file"
