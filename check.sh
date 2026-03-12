@@ -6,9 +6,9 @@ usage() {
   cat <<'EOF'
 Usage: ./check.sh
 
-The script builds ./hexdump, compares its file-based output against
-verify.py across inputs/*.bin fixtures, then reports the AVX instruction
-ratio for symbol hexdump_avx.
+The script builds ./hexdump, streams inputs/*.bin fixtures into both
+verify.py and ./hexdump across several hardcoded start addresses, then
+reports the AVX instruction ratio for symbol hexdump_avx.
 EOF
 }
 
@@ -46,6 +46,12 @@ default_build() {
 binary="./hexdump"
 symbol="hexdump_avx"
 previous_max_file="previous_max.txt"
+start_addrs=(
+  "0x00000090E630F8E0"
+  "0x00007FF61234A0C0"
+  "0x0000000012345678"
+  "0x0000ABCDEF102030"
+)
 
 if (($# > 0)); then
   case "$1" in
@@ -81,21 +87,23 @@ echo "==> checking output against verify.py"
 
 pass_count=0
 for input_path in "${inputs[@]}"; do
-  python3 verify.py "$input_path" >"$expected_file"
-  if ! "$binary" "$input_path" >"$actual_file"; then
-    die "binary failed for fixture: $input_path"
-  fi
+  for start_addr in "${start_addrs[@]}"; do
+    python3 verify.py "$start_addr" <"$input_path" >"$expected_file"
+    if ! "$binary" "$start_addr" <"$input_path" >"$actual_file"; then
+      die "binary failed for fixture: $input_path (start address $start_addr)"
+    fi
 
-  if ! cmp -s "$expected_file" "$actual_file"; then
-    echo "Mismatch for $input_path" >&2
-    diff -u "$expected_file" "$actual_file" >&2 || true
-    die "output differs from verify.py"
-  fi
+    if ! cmp -s "$expected_file" "$actual_file"; then
+      echo "Mismatch for $input_path at start address $start_addr" >&2
+      diff -u "$expected_file" "$actual_file" >&2 || true
+      die "output differs from verify.py"
+    fi
 
-  pass_count=$((pass_count + 1))
+    pass_count=$((pass_count + 1))
+  done
 done
 
-echo "==> output matches verify.py on ${pass_count} fixture(s)"
+echo "==> output matches verify.py on ${pass_count} fixture/address case(s)"
 
 echo "==> checking AVX ratio for symbol: $symbol"
 objdump -d -M intel --disassemble="$symbol" "$binary" >"$disasm_file"

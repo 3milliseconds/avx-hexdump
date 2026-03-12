@@ -5,8 +5,6 @@
 #include <string.h>
 #include <unistd.h>
 
-static const uint64_t BASE_ADDR = 0x00000090E630F8E0ULL;
-
 static const char HEX_LUT[32] __attribute__((aligned(32))) =
     "0123456789abcdef0123456789abcdef";
 
@@ -66,24 +64,30 @@ static void append_byte_hex_lower(char **dst, uint8_t value)
     *(*dst)++ = digits[value & 0x0f];
 }
 
-static int dump_file(const char *path)
+static int parse_base_addr(const char *text, uint64_t *value)
 {
-    FILE *f = fopen(path, "rb");
+    char *end = NULL;
+    unsigned long long parsed = strtoull(text, &end, 0);
+
+    if (text[0] == '\0' || end == text || *end != '\0') {
+        return -1;
+    }
+
+    *value = (uint64_t)parsed;
+    return 0;
+}
+
+static int dump_stream(FILE *stream, uint64_t base_addr)
+{
     uint8_t chunk[16];
     size_t offset = 0;
 
-    if (!f) {
-        fprintf(stderr, "Error: failed to open '%s'\n", path);
-        return 1;
-    }
-
     for (;;) {
-        size_t n = fread(chunk, 1, sizeof(chunk), f);
+        size_t n = fread(chunk, 1, sizeof(chunk), stream);
 
         if (n == 0) {
-            if (ferror(f)) {
-                fprintf(stderr, "Error: failed to read '%s'\n", path);
-                fclose(f);
+            if (ferror(stream)) {
+                fprintf(stderr, "Error: failed to read stdin\n");
                 return 1;
             }
             break;
@@ -97,7 +101,7 @@ static int dump_file(const char *path)
             *p++ = '[';
             *p++ = '0';
             *p++ = 'x';
-            append_u64_hex_upper(&p, BASE_ADDR + offset);
+            append_u64_hex_upper(&p, base_addr + offset);
             *p++ = ']';
             *p++ = '[';
             append_u64_hex_upper(&p, (uint64_t)offset);
@@ -137,7 +141,6 @@ static int dump_file(const char *path)
 
             if (write_all_stdout(line, (size_t)(p - line)) != 0) {
                 fprintf(stderr, "Error: failed to write stdout\n");
-                fclose(f);
                 return 1;
             }
         }
@@ -145,16 +148,22 @@ static int dump_file(const char *path)
         offset += n;
     }
 
-    fclose(f);
     return 0;
 }
 
 int main(int argc, char *argv[])
 {
+    uint64_t base_addr = 0;
+
     if (argc != 2) {
-        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <start-address>\n", argv[0]);
         return 1;
     }
 
-    return dump_file(argv[1]);
+    if (parse_base_addr(argv[1], &base_addr) != 0) {
+        fprintf(stderr, "Error: invalid start address '%s'\n", argv[1]);
+        return 1;
+    }
+
+    return dump_stream(stdin, base_addr);
 }

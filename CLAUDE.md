@@ -2,7 +2,7 @@
 - Build an implementation that matches the exact observable output of `verify.py`.
 - The required row format is:
   - `[0xABSOLUTE_ADDRESS][RELATIVE_INDEX: hex1 hex2 hex3 ... | ascii ]`
-- Input is file-based again: the program should accept a file path argument, and `verify.py` is the oracle for that file.
+- Input is stdin-based: the program should read bytes from standard input, and `verify.py` is the oracle for that stream.
 
 ## Canonical Reference
 - Treat `verify.py` as the output oracle.
